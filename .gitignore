@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Datasets (large CSVs not tracked)
+dataset/ids2018_csv/*.csv
+dataset/ids2018_csv/*.parquet
+
+# IDE
+.vscode/
+.idea/
