@@ -5,19 +5,31 @@ from pathlib import Path
 import xgboost as xgb 
 from sklearn.metrics import classification_report, confusion_matrix, average_precision_score
 import matplot as plt
+import logging
 
 SPLITS_DIR = Path("dataset/data-split/splits")
 MODEL_DIR = Path("models")
 
 def train_and_evaluate():
-    print("\nXGBoost Training")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = MODEL_DIR / f"run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Created run directory: {run_dir}/")
 
-    print("\n1. Loading split matrices")
+    log_file = run_dir / "training_output.log"
+    logging.basicConig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHanfler()
+        ]
+    )
+
+    logging.info("XGBoost Training")
+    logging.info(f"Created run directory: {run_dir}/")
+
+    logging.info("\n1. Loading split matrices")
     t0 = time.perf_counter()
     X_train = pd.read_parquet(SPLITS_DIR / "X_train.parquet")
     X_test = pd.read_parquet(SPLITS_DIR/ "X_test.parquet")
@@ -25,8 +37,15 @@ def train_and_evaluate():
     y_train = pd.read_parquet(SPLITS_DIR / "y_train.parquet")['Target']
     y_test = pd.read_parquet(SPLITS_DIR / "y_test.parquet")['Target']
 
-    print(f"Loaded {len(X_train):,} training rows and {len(X_test):,} testing rows in {time.perf_counter()-t0:.1f}s")
-    print("\nInitialise XGBoost Classifier")
+    logging.info(f"Loaded {len(X_train):,} training rows and {len(X_test):,} testing rows in {time.perf_counter()-t0:.1f}s")
+
+    logging.info("\nInitialise XGBoost Classifier")
+
+    neg_class_count = (y_train == 0).sum()
+    pos_class_count = (y_train ==1).sum()
+    imbalance_weight = neg_class_count / pos_class_count
+    logging.info(f"Calculated scale_pos_weight: {imbalance_weight:.2f}")
+
     clf = xgb.XGBClassifier(
         n_estimators=200,
         learning_rate=0.1,
@@ -38,49 +57,61 @@ def train_and_evaluate():
         eval_metrics="aucpr"
     )
 
-    print("\n3. Training the model (monitoring log loss and PR-AUC)")
+    logging.info("\n3. Training the model (monitoring log loss and PR-AUC)")
 
     t1 = time.perf_counter()
 
     clf.fit(
         X_train, y_train,
         eval_set=[(X_train, y_train), (X_test, y_test)],
-        verbose=10
+        verbose=1
     )
-    print(f"\nTraining completed in {time.perf_counter()-t1:.1f}s")
-    print(f"\nBest iteration occured at tree num: {clf.best_iteration}")
+    logging.info(f"\nTraining completed in {time.perf_counter()-t1:.1f}s")
+    logging.info(f"\nBest iteration occured at tree num: {clf.best_iteration}")
 
-    print("\n4. Generating prediction on test set")
+    logging.info("\n4. Generating prediction on test set")
 
     t2 = time.perf_counter()
 
     y_pred = clf.predict(X_test)
     y_prob = clf.predict_proba(X_test)[:,1]
-    print(f"Inference completed in {time.perf_counter()-t2:.1f}s")
+    logging.info(f"Inference completed in {time.perf_counter()-t2:.1f}s")
 
-    print("\n\n\n\n\nPRDOCUTION EVALUATION")
+    logging.info("\nPRDOCUTION EVALUATION")
 
     pr_auc = average_precision_score(y_test, y_prob)
-    print(f"\nPrecision-Recall AUC (PR-AUC): {pr_auc:.4f} (Closer to 1.0 is optimal)")
+    logging.info(f"\nPrecision-Recall AUC (PR-AUC): {pr_auc:.4f} (Closer to 1.0 is optimal)")
 
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred, target_names=['Benign (0)', 'Attack (1)'], digits=4))
+    logging.info("\nClassification Report:")
+    logging.info(classification_report(y_test, y_pred, target_names=['Benign (0)', 'Attack (1)'], digits=4))
 
-    print("\nConfusion Matrix:")
+    logging.info("\nConfusion Matrix:")
     cm = confusion_matrix(y_test, y_pred)
-    print(f"True Negatives (Benign passed):  {cm[0][0]:,}")
-    print(f"False Positives (False Alarms):  {cm[0][1]:,}")
-    print(f"False Negatives (Missed Attack): {cm[1][0]:,}")
-    print(f"True Positives (Attack blocked): {cm[1][1]:,}")
+    logging.info(f"True Negatives (Benign passed):  {cm[0][0]:,}")
+    logging.info(f"False Positives (False Alarms):  {cm[0][1]:,}")
+    logging.info(f"False Negatives (Missed Attack): {cm[1][0]:,}")
+    logging.info(f"True Positives (Attack blocked): {cm[1][1]:,}")
 
-    print("\n5. Saving model...")
+    logging.info("\n5. Saving model")
+
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODEL_DIR / "xgboost_ids_baseline.json"
+    model_path = MODEL_DIR / "xgboost_ids.json"
     clf.save_model(model_path)
     model_mb = model_path.stat().st_size / (1024 * 1024)
-    print(f"Model saved safely to {model_path} ({model_mb:.2f} MB)")
 
-    print("\n6. Generating learning curves")
+    logging.info(f"Model saved to {model_path} ({model_mb:.2f} MB)")
+
+    logging.info("Extracting top 15 most important features for attack detection")
+
+    plt.figure(figsize=(10,8))
+    xgb.plot_important(clf, max_num_features=15, importance_type='gain', show_values=False)
+    plt.title("Top 15 Most Important Features for Detecting Attacks")
+    plt.tight_layout()
+    plt.savefig(run_dir / "feature_importance.png")
+    plt.close()
+    logging.info("Feature importance graph saved")
+
+    logging.info("\n6. Generating learning curves")
     results = clf.evals_result()
 
     train_aucpr = results['validation_0']['aucpr']
@@ -103,7 +134,8 @@ def train_and_evaluate():
     graph_path = run_dir / "learning_crubes.png"
     plt.save(graph_path)
     plt.close()
-    print(f"Learning curve graph saved to {graph_path}")
+    logging.info(f"Learning curve graph saved to {graph_path}")
+    logging.info(f"Run completely finished. All assets stored in: {run_dir}/")
 
 if __name__ == "__main__":
     train_and_evaluate()

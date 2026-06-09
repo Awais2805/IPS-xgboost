@@ -15,7 +15,7 @@ venv/
 # Datasets (large CSVs not tracked)
 dataset/ids2018_csv/*.csv
 dataset/ids2018_csv/*.parquet
-dataset/*.parquet
+*/*.parquet
 
 # IDE
 .vscode/
