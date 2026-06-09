@@ -15,8 +15,13 @@ venv/
 # Datasets (large CSVs not tracked)
 dataset/ids2018_csv/*.csv
 dataset/ids2018_csv/*.parquet
-*/*.parquet
+*.parquet
 
 # IDE
 .vscode/
 .idea/
+
+# Ignore model artifacts and logs
+models/
+*.log
+*.json

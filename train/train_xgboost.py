@@ -1,10 +1,10 @@
-import datetime
+from datetime import datetime
 import pandas as pd 
 import time 
 from pathlib import Path 
 import xgboost as xgb 
 from sklearn.metrics import classification_report, confusion_matrix, average_precision_score
-import matplot as plt
+import matplotlib.pyplot as plt
 import logging
 
 SPLITS_DIR = Path("dataset/data-split/splits")
@@ -17,12 +17,12 @@ def train_and_evaluate():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = run_dir / "training_output.log"
-    logging.basicConig(
+    logging.basicConfig(
         level=logging.INFO,
         format='%(message)s',
         handlers=[
             logging.FileHandler(log_file),
-            logging.StreamHanfler()
+            logging.StreamHandler()
         ]
     )
 
@@ -47,14 +47,15 @@ def train_and_evaluate():
     logging.info(f"Calculated scale_pos_weight: {imbalance_weight:.2f}")
 
     clf = xgb.XGBClassifier(
-        n_estimators=200,
-        learning_rate=0.1,
+        n_estimators=5000,
+        learning_rate=0.05,
         max_depth=6,
         tree_method='hist',
         random_state=42,
         n_jobs=-1,
-        early_stopping_rounds=10,
-        eval_metrics="aucpr"
+        early_stopping_rounds=20,
+        eval_metric=["logloss", "aucpr", "error"],
+        scale_pos_weight=imbalance_weight
     )
 
     logging.info("\n3. Training the model (monitoring log loss and PR-AUC)")
@@ -94,8 +95,7 @@ def train_and_evaluate():
 
     logging.info("\n5. Saving model")
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODEL_DIR / "xgboost_ids.json"
+    model_path = run_dir / "xgboost_ids.json"
     clf.save_model(model_path)
     model_mb = model_path.stat().st_size / (1024 * 1024)
 
@@ -104,7 +104,7 @@ def train_and_evaluate():
     logging.info("Extracting top 15 most important features for attack detection")
 
     plt.figure(figsize=(10,8))
-    xgb.plot_important(clf, max_num_features=15, importance_type='gain', show_values=False)
+    xgb.plot_importance(clf, max_num_features=15, importance_type='gain', show_values=False)
     plt.title("Top 15 Most Important Features for Detecting Attacks")
     plt.tight_layout()
     plt.savefig(run_dir / "feature_importance.png")
@@ -115,10 +115,10 @@ def train_and_evaluate():
     results = clf.evals_result()
 
     train_aucpr = results['validation_0']['aucpr']
-    test_aucpr = results['validation-1']['aucpr']
+    test_aucpr = results['validation_1']['aucpr']
     epochs = range(1, len(train_aucpr)+1)
 
-    plt.figure(figize=(10,6))
+    plt.figure(figsize=(10,6))
     plt.plot(epochs, train_aucpr, label='Train PR-AUC', color='blue', linewidth=2)
     plt.plot(epochs, test_aucpr, label='Test PR-AUC', color='orange', linewidth=2)
 
@@ -131,8 +131,8 @@ def train_and_evaluate():
     plt.legend()
     plt.grid(True)
 
-    graph_path = run_dir / "learning_crubes.png"
-    plt.save(graph_path)
+    graph_path = run_dir / "learning_curves.png"
+    plt.savefig(graph_path)
     plt.close()
     logging.info(f"Learning curve graph saved to {graph_path}")
     logging.info(f"Run completely finished. All assets stored in: {run_dir}/")
