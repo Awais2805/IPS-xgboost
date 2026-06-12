@@ -16,6 +16,7 @@ venv/
 dataset/ids2018_csv/*.csv
 dataset/ids2018_csv/*.parquet
 *.parquet
+*.zip
 
 # IDE
 .vscode/
