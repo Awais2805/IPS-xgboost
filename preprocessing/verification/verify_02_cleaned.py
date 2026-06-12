@@ -120,7 +120,7 @@ def verify_data_health_and_artifacts(parquet_file):
     print(f"Total NaN values: {null_count}")
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    inf_count = np.isinf([numeric_cols]).sum().sum()
+    inf_count = df[numeric_cols].isin([np.inf, -np.inf]).sum().sum()
     print(f"Total Inf values: {inf_count}")
 
     assert null_count == 0, f"ERROR: NaN values detected in cleaned dataset"
@@ -145,23 +145,23 @@ def verify_labels_and_stats(df):
     counts = df['Label'].value_counts()
     total = len(df)
 
-    print(f"Unique labels found: {len(counts)} (Expected 16)")
-    for label, count in count.items():
-        pct = (count/total) * 100
+    print(f"Unique labels found: {len(counts)} (Expected 15)")
+    for label_name, label_count in counts.items():
+        pct = (label_count/total) * 100
 
-        flag = "WHITESPACE WARNING" if label != label.strip() else ""
-        print(f"{label:25s} | {count:>11,} ({pct:6.3f}%) {flag}")
+        flag = "WHITESPACE WARNING" if label_name != label_name.strip() else ""
+        print(f"{label_name:25s} | {label_count:>11,} ({pct:6.3f}%) {flag}")
 
-    assert len(counts) == 16, "Warning: label count is not 16 - check for whitespace dups"
+    assert len(counts) == 15, "Warning: label count is not 15 - check for whitespace dups"
     print("OK: All labels successfully merged and cleaned")
 
     print("\n6. Final Feature Stats (sample)")
     sample_cols = ["Flow_Duration", "Tot_Fwd_Pkts", "Flow_Byts_s", "Pkt_Len_Mean"]
 
-    pd.set_option('display.flot_format', lambda x: f'{x:,.4f}')
+    pd.set_option('display.float_format', lambda x: f'{x:,.4f}')
     stats = df[sample_cols].describe().T[['mean', 'std', 'max', 'min']]
     print(stats.to_string())
-    pd.reset_option('display.floar_format')
+    pd.reset_option('display.float_format')
 
 if __name__ == "__main__":
 
