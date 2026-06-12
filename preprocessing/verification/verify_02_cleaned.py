@@ -130,7 +130,7 @@ def verify_data_health_and_artifacts(parquet_file):
     print("\nVerifying Artifact Resolution")
     min_flow_dur = df["Flow_Duration"].min()
     print(f"Flow_Duration minimum: {min_flow_dur:,.2f}")
-    assert min_flow_dur >= 0, "ERROR: Negative Flow Duration artifacts survived"
+    assert min_flow_dur >= 0, "ERROR: Negative Flow Duration artifacts survived cleaning"
 
     iat_cols = [c for c in df.columns if "IAT" in c]
     min_iat = df[iat_cols].min().min()
