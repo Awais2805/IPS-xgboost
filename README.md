@@ -66,10 +66,10 @@ The clean stage drops:
 - **`Dst Port`** — leakage risk. A model could otherwise memorise that port 22 ↔ DDoS; an attacker switching ports would defeat that shortcut.
 - **Near-constant columns** (e.g. `Bwd PSH Flags`, `Fwd URG Flags`, blk-rate avgs) — no information, just noise.
 - **Redundant pairs** (Subflow Fwd/Bwd Pkts vs Tot counterparts) — Pearson ≈ 1.0.
-- **Rows with negative `Flow Duration`** — a dataset artefact; duration cannot be negative.
+- **Rows with negative `Flow Duration`** — a dataset artifact; duration cannot be negative.
 - **Inf / NaN rows and exact duplicates.**
 
-Other artefact fixes:
+Other artifact fixes:
 
 - `Flow IAT Min` and `Fwd IAT Min` had negative values (time can't be negative) → clipped to zero.
 - `Init Fwd Win Byts` / `Init Bwd Win Byts` use `-1` as a null sentinel — left as-is. XGBoost will learn `-1` is a flag, not a value.
