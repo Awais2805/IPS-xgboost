@@ -178,7 +178,7 @@ The final shape is a hybrid: signature rules as the fast path, ML-based action p
 
 - [x] Data collection
 - [x] Preprocessing pipeline (merge + clean + verify)
-- [x] Binary encoding
+- [ ] Binary encoding (refactoring in progress)
 - [x] First XGBoost training run + post-run viz
 - [ ] Preprocessing exploratory plots on raw merged data
 - [ ] Multi-class model
