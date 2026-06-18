@@ -144,6 +144,8 @@ def verify_labels_and_stats(df):
     print("\n5. Label Integrity")
     counts = df['Label'].value_counts()
     total = len(df)
+    columns = df.columns
+    num_cols = len(columns)
 
     print(f"Unique labels found: {len(counts)} (Expected 15)")
     for label_name, label_count in counts.items():
@@ -162,6 +164,11 @@ def verify_labels_and_stats(df):
     stats = df[sample_cols].describe().T[['mean', 'std', 'max', 'min']]
     print(stats.to_string())
     pd.reset_option('display.float_format')
+
+
+    print(f"\n Printing all column names ({num_cols}):")
+    for col in columns:
+        print(col)
 
 if __name__ == "__main__":
 
