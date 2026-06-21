@@ -4,6 +4,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path 
+import gc 
+import numpy as np
 
 import pandas as pd 
 from sklearn.model_selection import train_test_split
@@ -90,50 +92,79 @@ def parse_split_strat(file_name):
     )
 
 
-
 def generate_splits(in_path, out_dir):
-    logging.info(f"STAGE :{STAGE}.upper()")
-    logging.info(f"Input: {in_path}")
-    logging.info(f"Output: {out_dir}")
+    logging.info(f"=== {STAGE.upper()} STAGE START ===")
+    logging.info(f"Input:  {in_path}")
+    logging.info(f"Output: {out_dir}/")
 
-    logging.info("1. Loading Encoded Data")
+    logging.info("1. Loading encoded data")
     t0 = time.perf_counter()
     df = pd.read_parquet(in_path)
-    logging.info(f" Loaded {len(df):,} rows x {len(df.columns)} cols in {time.perf_counter()-t0:.1f}s")
+    logging.info(f"   Loaded {len(df):,} rows x {len(df.columns)} cols in {time.perf_counter()-t0:.1f}s")
 
     if TARGET_COL not in df.columns:
-        sys.exit(f"ABORT: '{TARGET_COL}' column missing")
+        sys.exit(f"ABORT: '{TARGET_COL}' column missing from encoded input.")
 
-    logging.info("2. Seperating featutres (X) and target (y)")
-    X = df.drop(columns={TARGET_COL})
-    y = df([TARGET_COL])
-    logging.info(f"X: {X.shape[0]:,} dimensions x {X.shape[1]} features")
-    dist = y.value_counts().sort_index().rename({0: "o (Benign)", 1: "1 (Attack)"})
-    logging.info("Class dist before split: \n" + dist.to_string())
+    # Halve the in-RAM footprint: 4.9 GB -> ~3.3 GB per copy.
+    # Lossless for tree splitting (XGBoost works in float32 regardless).
+    float_cols = df.select_dtypes("float64").columns
+    if len(float_cols):
+        df[float_cols] = df[float_cols].astype("float32")
+        logging.info(f"   Downcast {len(float_cols)} float64 cols -> float32")
 
-    logging.info(f"3. Startified {int((1-TEST_SIZE)*100)}/{int(TEST_SIZE)*100} split")
-    t1 = time.perf_counter()
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
+    logging.info("2. Separating target (in-place pop) and computing stratified indices")
+    y = df.pop(TARGET_COL)   # removes Target from df in place -> no full-frame copy
+    dist = y.value_counts().sort_index().rename({0: "0 (Benign)", 1: "1 (Attack)"})
+    logging.info("   Class distribution before split:\n" + dist.to_string())
+
+    train_idx, test_idx = train_test_split(
+        np.arange(len(df)), test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
     )
-    logging.info(f"Split complete in {time.perf_counter()-t1:.1f}s")
 
-
-    full_pct = y.mean() * 100
-    train_pct = y_train.mean() * 100
-    test_pct = y_test.mean() * 100
-    logging.info(f"   Full:  {full_pct:6.4f}% attacks")
-    logging.info(f"   Train: {train_pct:6.4f}% attacks ({y_train.sum():,} rows)")
-    logging.info(f"   Test:  {test_pct:6.4f}% attacks ({y_test.sum():,} rows)")
+    train_pct = y.iloc[train_idx].mean() * 100
+    test_pct = y.iloc[test_idx].mean() * 100
+    logging.info(f"   Attacks — full {y.mean()*100:6.4}% | test {test_pct:6.4f}%")
     assert abs(train_pct - test_pct) < 0.01, "ERROR: stratification failed"
 
+    logging.info(f"3. Stratified {int(round((1-TEST_SIZE*100)))} split — writing one side at a time")
+    for name, idx in (("train", train_idx), ("test", test_idx)):
+        t1 = time.perf_counter()
+        df.iloc[idx].to_parquet(out_dir / f"X_{name}.parquet", compression="snappy", index=False)
+        y.iloc[idx].to_frame().to_parquet(out_dir / f"y_{name}.parquet", compression="snappy", index=False)
+        logging.info(f"   {name}: {len(idx):,} rows ->parquet ({time.perf_counter()-t1:.1f}s)")
+        gc.collect()
 
-    logging.info("4. Saving matrices")
-    X_train.to_parquet(out_dir / "X_train.parquet", compression="snappy", index=False)
-    X_test.to_parquet(out_dir / "X_test.parquet", compression="snappy", index=False)
-    y_train.to_frame().to_parquet(out_dir / "y_train.parquet", compression="snappy", index=False)
-    y_test.to_frame().to_parquet(out_dir / "y_test.parquet", compression="snappy", index=False)
+    logging.info(f"=== {STAGE.upper()} DONE — matrices saved to {out_dir}")
 
-    logging.info(f"   X_train {X_train.shape} | X_test {X_test.shape}")
-    logging.info(f"   y_train {y_train.shape} | y_test {y_test.shape}")
-    logging.info(f"=== {STAGE.upper()} DONE — matrices written to {out_dir}/ ===")
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Stratified train/test split of an encoded CIC-IDS2018 parquet.")
+    parser.add_argument("--in_path", type=str, default="auto",
+                        help="Path to an encoded parquet, or 'auto' for the interactive menu.")
+    parser.add_argument("--out_dir", type=str, default=None,
+                        help="Override output dir. Default: chosen from the split-strategy token.")
+    parser.add_argument("--log_file", type=str, default=None)
+    parser.add_argument("--log_level", type=str, default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--non_interactive", action="store_true")
+    args = parser.parse_args()
+
+    in_path = resolve_input(args.in_path, args.non_interactive)
+    split_strat = parse_split_strat(in_path.name)
+
+    if split_strat == "time_based":
+        sys.exit("ABORT: time_based split not implemented — it needs chronological Timestamp handling, "
+                 "not a stratified random split. Refusing to split this artefact.")
+
+    base_dir = Path(args.out_dir) if args.out_dir else SPLIT_DIR_BY_STRAT[split_strat]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = base_dir / f"split_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = args.log_file or str(run_dir / "split.log")
+    set_logging(log_file, args.log_level)
+    logging.info(f"Logging to {log_file}")
+    logging.info(f"Detected split strategy: {split_strat}")
+    logging.info(f"Run directory: {run_dir}/")
+
+    generate_splits(in_path, run_dir)

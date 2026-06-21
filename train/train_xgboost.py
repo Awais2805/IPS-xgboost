@@ -1,19 +1,87 @@
 from datetime import datetime
-import pandas as pd 
-import time 
-from pathlib import Path 
-import xgboost as xgb 
-from sklearn.metrics import classification_report, confusion_matrix, average_precision_score
+import argparse
+import gc
+import resource
+import numpy as np
+import pandas as pd
+import time
+from pathlib import Path
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    average_precision_score,
+    precision_recall_curve,
+)
 import matplotlib.pyplot as plt
 import logging
 
-SPLITS_DIR = Path("dataset/data-split/splits")
 MODEL_DIR = Path("models")
+SPLIT_DIR_BY_STRAT = {
+    "8020_stratified": Path("dataset/data-splits/8020_strat_split"),
+    "time_based": Path("dataset/data-splits/time_based_split"),
+}
+REQUIRED_FILES = ["X_train.parquet", "X_test.parquet", "y_train.parquet", "y_test.parquet"]
 
-def train_and_evaluate():
+
+def validate_split_dir(d):
+    missing = [f for f in REQUIRED_FILES if not (d / f).is_file()]
+    if missing:
+        raise SystemExit(f"Split dir {d} is missing: {missing}")
+    return d
+
+
+def select_split_dir(base):
+    if not base.exists():
+        raise SystemExit(f"Split base dir does not exist: {base}")
+    runs = sorted(
+        (r for r in base.glob("split_*") if r.is_dir()),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    if not runs:
+        raise SystemExit(f"No split_* run dirs found in {base}")
+    print(f"\nFound {len(runs)} split run(s) in {base}:")
+    for i, r in enumerate(runs):
+        tag = " [Most Recent]" if i == 0 else ""
+        print(f"  {i + 1}. {r.name}{tag}")
+    while True:
+        choice = input("\nEnter number to train on (Enter for [1]): ").strip()
+        if choice == "":
+            return runs[0]
+        if choice.isdigit() and 1 <= int(choice) <= len(runs):
+            return runs[int(choice) - 1]
+        print(f"Invalid — enter a number 1–{len(runs)} or press Enter.")
+
+
+def resolve_split_dir(split_strat, in_path, non_interactive):
+    if in_path != "auto":
+        d = Path(in_path)
+        if not d.is_dir():
+            raise SystemExit(f"--in_path is not a directory: {d}")
+        return validate_split_dir(d)
+    base = SPLIT_DIR_BY_STRAT[split_strat]
+    if non_interactive:
+        runs = sorted(
+            (r for r in base.glob("split_*") if r.is_dir()),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if not runs:
+            raise SystemExit(f"No split_* run dirs found in {base}")
+        return validate_split_dir(runs[0])
+    return validate_split_dir(select_split_dir(base))
+
+
+def log_peak_ram(tag):
+    # macOS reports ru_maxrss in bytes (Linux uses KiB); this is darwin.
+    peak_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 3)
+    logging.info(f"[mem] peak RSS after {tag}: {peak_gb:.2f} GB")
+
+
+def train_and_evaluate(splits_dir, out_base):
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = MODEL_DIR / f"run_{timestamp}"
+    run_dir = Path(out_base) / f"run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = run_dir / "training_output.log"
@@ -28,62 +96,126 @@ def train_and_evaluate():
 
     logging.info("XGBoost Training")
     logging.info(f"Created run directory: {run_dir}/")
+    logging.info(f"Using split run: {splits_dir}/")
 
-    logging.info("\n1. Loading split matrices")
+    logging.info("\n1. Loading train matrices (test deferred until evaluation)")
     t0 = time.perf_counter()
-    X_train = pd.read_parquet(SPLITS_DIR / "X_train.parquet")
-    X_test = pd.read_parquet(SPLITS_DIR/ "X_test.parquet")
+    X_train_full = pd.read_parquet(splits_dir / "X_train.parquet")
+    y_train_full = pd.read_parquet(splits_dir / "y_train.parquet")['Target']
+    logging.info(f"Loaded {len(X_train_full):,} training rows in {time.perf_counter()-t0:.1f}s")
 
-    y_train = pd.read_parquet(SPLITS_DIR / "y_train.parquet")['Target']
-    y_test = pd.read_parquet(SPLITS_DIR / "y_test.parquet")['Target']
+    # -----------------------------------------------------------------
+    # PHASE 1 — carve a validation set, early-stop to find the tree count
+    # and the operating threshold. Free X_train_full immediately so the
+    # fit doesn't hold the full frame + the carved copies at once.
+    # -----------------------------------------------------------------
+    logging.info("\n2. Carving validation set from train (stratified 80/20)")
+    X_tr, X_val, y_tr, y_val = train_test_split(
+        X_train_full, y_train_full, test_size=0.2, random_state=42, stratify=y_train_full
+    )
+    del X_train_full
+    gc.collect()
+    logging.info(f"Phase-1 train: {len(X_tr):,} | Validation: {len(X_val):,}")
 
-    logging.info(f"Loaded {len(X_train):,} training rows and {len(X_test):,} testing rows in {time.perf_counter()-t0:.1f}s")
+    spw_phase1 = (y_tr == 0).sum() / (y_tr == 1).sum()
+    logging.info(f"Phase-1 scale_pos_weight (train subset): {spw_phase1:.2f}")
 
-    logging.info("\nInitialise XGBoost Classifier")
-
-    neg_class_count = (y_train == 0).sum()
-    pos_class_count = (y_train ==1).sum()
-    imbalance_weight = neg_class_count / pos_class_count
-    logging.info(f"Calculated scale_pos_weight: {imbalance_weight:.2f}")
-
-    clf = xgb.XGBClassifier(
+    clf_es = xgb.XGBClassifier(
         n_estimators=5000,
         learning_rate=0.05,
         max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
         tree_method='hist',
         random_state=42,
         n_jobs=-1,
-        early_stopping_rounds=20,
-        eval_metric=["logloss", "aucpr", "error"],
-        scale_pos_weight=imbalance_weight
+        early_stopping_rounds=50,
+        eval_metric=["logloss", "aucpr"],   # aucpr last -> drives early stopping
+        scale_pos_weight=spw_phase1
     )
 
-    logging.info("\n3. Training the model (monitoring log loss and PR-AUC)")
-
+    logging.info("\n3. Phase 1: training with early stopping on validation PR-AUC")
     t1 = time.perf_counter()
-
-    clf.fit(
-        X_train, y_train,
-        eval_set=[(X_train, y_train), (X_test, y_test)],
+    clf_es.fit(
+        X_tr, y_tr,
+        eval_set=[(X_tr, y_tr), (X_val, y_val)],
         verbose=1
     )
-    logging.info(f"\nTraining completed in {time.perf_counter()-t1:.1f}s")
-    logging.info(f"\nBest iteration occured at tree num: {clf.best_iteration}")
+    best_n_trees = clf_es.best_iteration + 1   # best_iteration is 0-indexed
+    logging.info(f"Phase 1 completed in {time.perf_counter()-t1:.1f}s")
+    logging.info(f"Best iteration: {clf_es.best_iteration} -> using {best_n_trees} trees for the final model")
 
-    logging.info("\n4. Generating prediction on test set")
+    logging.info("\n4. Selecting operating threshold (max F1 on validation)")
+    val_prob = clf_es.predict_proba(X_val)[:, 1]
+    precisions, recalls, thresholds = precision_recall_curve(y_val, val_prob)
+    f1s = (2 * precisions * recalls) / (precisions + recalls + 1e-9)
+    best_idx = int(np.argmax(f1s[:-1]))   # f1s has one more element than thresholds
+    best_threshold = float(thresholds[best_idx])
+    logging.info(
+        f"Chosen threshold: {best_threshold:.4f} "
+        f"(val precision {precisions[best_idx]:.4f}, recall {recalls[best_idx]:.4f}, F1 {f1s[best_idx]:.4f})"
+    )
+    (run_dir / "operating_threshold.txt").write_text(f"{best_threshold:.6f}\n")
+    logging.info(f"Operating threshold saved to {run_dir / 'operating_threshold.txt'}")
 
+    # capture the learning-curve data, then free the phase-1 matrices
+    es_results = clf_es.evals_result()
+    es_best_iter = clf_es.best_iteration
+    del X_tr, X_val, y_tr, y_val, val_prob
+    gc.collect()
+    log_peak_ram("phase 1")
+
+    # -----------------------------------------------------------------
+    # PHASE 2 — reload the FULL train set and refit with the discovered
+    # tree count (no early stopping). This is the model we keep.
+    # -----------------------------------------------------------------
+    logging.info("\n5. Phase 2: reloading full train set and refitting")
     t2 = time.perf_counter()
+    X_train_full = pd.read_parquet(splits_dir / "X_train.parquet")
+    spw_full = (y_train_full == 0).sum() / (y_train_full == 1).sum()
+    logging.info(f"Reloaded {len(X_train_full):,} rows in {time.perf_counter()-t2:.1f}s")
+    logging.info(f"Phase-2 scale_pos_weight (full train): {spw_full:.2f} | trees: {best_n_trees}")
 
-    y_pred = clf.predict(X_test)
-    y_prob = clf.predict_proba(X_test)[:,1]
-    logging.info(f"Inference completed in {time.perf_counter()-t2:.1f}s")
+    clf = xgb.XGBClassifier(
+        n_estimators=best_n_trees,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        tree_method='hist',
+        random_state=42,
+        n_jobs=-1,
+        scale_pos_weight=spw_full
+    )
 
-    logging.info("\nPRDOCUTION EVALUATION")
+    t3 = time.perf_counter()
+    clf.fit(X_train_full, y_train_full, verbose=False)
+    logging.info(f"Phase 2 fit completed in {time.perf_counter()-t3:.1f}s")
+    del X_train_full, y_train_full
+    gc.collect()
+    log_peak_ram("phase 2")
+
+    # -----------------------------------------------------------------
+    # EVALUATION — load held-out test set now, apply the phase-1 threshold
+    # -----------------------------------------------------------------
+    logging.info("\n6. Loading test set and generating predictions")
+    t4 = time.perf_counter()
+    X_test = pd.read_parquet(splits_dir / "X_test.parquet")
+    y_test = pd.read_parquet(splits_dir / "y_test.parquet")['Target']
+    y_prob = clf.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= best_threshold).astype(int)
+    logging.info(f"Test load + inference completed in {time.perf_counter()-t4:.1f}s")
+    del X_test
+    gc.collect()
+
+    logging.info("\nPRODUCTION EVALUATION")
 
     pr_auc = average_precision_score(y_test, y_prob)
     logging.info(f"\nPrecision-Recall AUC (PR-AUC): {pr_auc:.4f} (Closer to 1.0 is optimal)")
 
-    logging.info("\nClassification Report:")
+    logging.info(f"\nClassification Report (threshold = {best_threshold:.4f}):")
     logging.info(classification_report(y_test, y_pred, target_names=['Benign (0)', 'Attack (1)'], digits=4))
 
     logging.info("\nConfusion Matrix:")
@@ -93,17 +225,14 @@ def train_and_evaluate():
     logging.info(f"False Negatives (Missed Attack): {cm[1][0]:,}")
     logging.info(f"True Positives (Attack blocked): {cm[1][1]:,}")
 
-    logging.info("\n5. Saving model")
-
+    logging.info("\n7. Saving model")
     model_path = run_dir / "xgboost_ids.json"
     clf.save_model(model_path)
     model_mb = model_path.stat().st_size / (1024 * 1024)
-
     logging.info(f"Model saved to {model_path} ({model_mb:.2f} MB)")
 
     logging.info("Extracting top 15 most important features for attack detection")
-
-    plt.figure(figsize=(10,8))
+    plt.figure(figsize=(10, 8))
     xgb.plot_importance(clf, max_num_features=15, importance_type='gain', show_values=False)
     plt.title("Top 15 Most Important Features for Detecting Attacks")
     plt.tight_layout()
@@ -111,19 +240,16 @@ def train_and_evaluate():
     plt.close()
     logging.info("Feature importance graph saved")
 
-    logging.info("\n6. Generating learning curves")
-    results = clf.evals_result()
+    # Learning curves from the phase-1 model (the one that had an eval_set)
+    logging.info("\n8. Generating learning curves (from phase-1 early-stopping run)")
+    train_aucpr = es_results['validation_0']['aucpr']
+    val_aucpr = es_results['validation_1']['aucpr']
+    epochs = range(1, len(train_aucpr) + 1)
 
-    train_aucpr = results['validation_0']['aucpr']
-    test_aucpr = results['validation_1']['aucpr']
-    epochs = range(1, len(train_aucpr)+1)
-
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     plt.plot(epochs, train_aucpr, label='Train PR-AUC', color='blue', linewidth=2)
-    plt.plot(epochs, test_aucpr, label='Test PR-AUC', color='orange', linewidth=2)
-
-    best_iteration = clf.best_iteration
-    plt.axvline(x=best_iteration, color='red', linestyle='--', label=f'Best Tree ({best_iteration})')
+    plt.plot(epochs, val_aucpr, label='Validation PR-AUC', color='orange', linewidth=2)
+    plt.axvline(x=es_best_iter, color='red', linestyle='--', label=f'Best Tree ({es_best_iter})')
 
     plt.title('XGBoost Learning Curve on CIC-IDS2018 (PR-AUC over Trees)')
     plt.xlabel('Number of Trees')
@@ -135,7 +261,20 @@ def train_and_evaluate():
     plt.savefig(graph_path)
     plt.close()
     logging.info(f"Learning curve graph saved to {graph_path}")
+    log_peak_ram("run end")
     logging.info(f"Run completely finished. All assets stored in: {run_dir}/")
 
+
 if __name__ == "__main__":
-    train_and_evaluate()
+    parser = argparse.ArgumentParser(description="Train XGBoost IPS model on a split run.")
+    parser.add_argument("--split_strat", choices=list(SPLIT_DIR_BY_STRAT), default="8020_stratified",
+                        help="Which split-strategy dir to pick the run from.")
+    parser.add_argument("--in_path", type=str, default="auto",
+                        help="Explicit split run dir, or 'auto' for the interactive menu.")
+    parser.add_argument("--out_dir", type=str, default=str(MODEL_DIR),
+                        help="Base output dir; run_<ts> is nested inside (default: models/).")
+    parser.add_argument("--non_interactive", action="store_true")
+    args = parser.parse_args()
+
+    splits_dir = resolve_split_dir(args.split_strat, args.in_path, args.non_interactive)
+    train_and_evaluate(splits_dir, args.out_dir)
