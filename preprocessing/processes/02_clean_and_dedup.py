@@ -19,7 +19,7 @@ BASE_COLUMNS_TO_DROP = [
       # Redundant Seg Size (2) — corr=1.0 linear duplicates, override verifier's "KEEP"
       "Fwd Seg Size Avg", "Bwd Seg Size Avg",
       # Leakage (1)
-      "Dst Port",]
+      "Dst Port", "Flow ID", "Src IP", "Dst IP"]
 
 def execution_checkpoint(step_name):
     response = input(f"\n[CHECKPOINT] Ready to execute: {step_name}. \nPress [Enter] to continue or [q] to quit: ").strip().lower()
@@ -40,217 +40,198 @@ def get_strat_drops(split_strat):
 
     return drops
 
-def select_merged_dataset(search_dir):
-
+def select_input(search_dir, split_strat):
     dir_path = Path(search_dir)
     if not dir_path.exists():
         sys.exit(f"Error: Search directory {search_dir} does not exist")
 
-    files = list(dir_path.glob("*-merged-*.parquet"))
-    if not files:
-        sys.exit(f"Error: No merged parquet files found in {search_dir}")
+    if split_strat == "time_based":
+        items = sorted((p for p in dir_path.glob("*-merged-per_day-*") if p.is_dir()),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        kind = "per-day folder"
+    else:
+        items = sorted((p for p in dir_path.glob("*-merged-*.parquet") if p.is_file()),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        kind = "merged parquet"
 
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    if not items:
+        sys.exit(f"Error: No {kind} found in {search_dir} for split_strat={split_strat}")
 
-    print(f"Found {len(files)} merged datasets in {search_dir}:")
-    for i, f in enumerate(files):
-        tag = "[Most Recent]" if i == 0 else ""
-        print(f" {i+1}. {f.name} {tag}")
-
-    # User input to select file
+    print(f"\nFound {len(items)} {kind}(s) in {search_dir}:")
+    for i, f in enumerate(items):
+        tag = " [Most Recent]" if i == 0 else ""
+        print(f" {i+1}. {f.name}{tag}")
 
     while True:
-        choice = input(f"\nEnter the number of the merged dataset to clean (enter for [1]): ").strip()
+        choice = input(f"\nEnter the number to clean (Enter for [1]): ").strip()
         if choice == "":
-            selected_file = files[0]
-            break
-        elif choice.isdigit() and 1 <= int(choice) <= len(files):
-            selected_file = files[int(choice)-1]
-            break
-        else:
-            print(f"Invalid choice. Please enter a number between 1 and {len(files)}, or press Enter for the most recent file.")
+            return items[0]
+        if choice.isdigit() and 1 <= int(choice) <= len(items):
+            return items[int(choice)-1]
+        print(f"Invalid choice. Enter 1-{len(items)} or press Enter for the most recent.")
 
-    print(f"\nLoading selected file -> {selected_file.name}")
-    return selected_file
 
-def apply_drops_and_dedup(in_path, out_dir, split_strat, encoding_strat):
+def resolve_input(in_path_arg, split_strat):
+    if in_path_arg == "auto":
+        return select_input(Path("preprocessing/processes_output/merged_datasets"), split_strat)
+    in_path = Path(in_path_arg)
+    if split_strat == "time_based":
+        if not in_path.is_dir():
+            sys.exit(f"Error: time_based expects a per-day FOLDER, got: {in_path}")
+    elif not in_path.is_file():
+        sys.exit(f"Error: input file does not exist: {in_path}")
+    return in_path
 
-    base_name = Path(in_path).name.split('-merged-')[0]
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_path = Path(out_dir) / f"{base_name}-cleaned-deduped_{split_strat}_{encoding_strat}_{timestamp}.parquet"
+def print_cleaned_stats(df):
+    try:
+        print("\n--- First 5 rows ---")
+        print(df.head(5).to_string(max_cols=10))
+        print("\n--- Feature stats (mean, std, min, max) ---")
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        stats = df[numeric_cols].describe().T[['mean', 'std', 'min', 'max']]
+        pd.set_option('display.float_format', lambda x: f'{x:,.4f}')
+        print(stats.to_string())
+        pd.reset_option('display.float_format')
+    except MemoryError:
+        print("\n(skipped stats — too large for describe())")
+    except Exception as e:
+        print(f"\n(stats error: {e})")
 
-    print(f"\nCleaning + deduping on merged file")
-    print(f"\nInput: {in_path}")
-    print(f"\nOutput: {out_path}")
-    print(f"\nSplit: {split_strat.upper()}")
-    print(f"\nEncoding: {encoding_strat.upper()}")
-
-    columns_to_drop = get_strat_drops(split_strat)
+def clean_one(in_path, out_path, columns_to_drop, interactive=True, verbose=True):
+    """Clean + dedup one raw parquet -> cleaned parquet. Returns final row count."""
+    in_path = Path(in_path)
     all_cols = pq.read_schema(in_path).names
-
     dropped_cols = [c for c in all_cols if c in columns_to_drop]
     keep_cols = [c for c in all_cols if c not in columns_to_drop]
 
-
-    # Load df with pruned columns
-    execution_checkpoint("Load merged parquet and drop predefined columns")
-    print(f"\n1. Loading {len(keep_cols)} cols (dropping {len(BASE_COLUMNS_TO_DROP)} at load)")
+    if interactive:
+        execution_checkpoint(f"Load {in_path.name} and drop predefined columns")
+    print(f"\n1. Loading {len(keep_cols)} cols from {in_path.name} (dropping {len(dropped_cols)})")
     t0 = time.perf_counter()
     df = pd.read_parquet(in_path, columns=keep_cols)
-    print(f"Loaded: {len(df):,} rows x {len(df.columns)} cols ({time.perf_counter()-t0:.1f}s)")
-    
-    print("\nSuccessfully dropped:")
-    for col in dropped_cols:
-        print(f"- {col}")
+    print(f"   Loaded: {len(df):,} rows x {len(df.columns)} cols ({time.perf_counter()-t0:.1f}s)")
+    if dropped_cols:
+        print(f"   Dropped: {dropped_cols}")
 
-    execution_checkpoint("Clean column names")
-    print("\n2. Cleaning column names (replacing whitespace/slashes with _)")
+    if interactive:
+        execution_checkpoint("Clean column names")
+    print("\n2. Cleaning column names (whitespace/slashes -> _)")
     df.columns = [c.replace(" ", "_").replace("/", "_") for c in df.columns]
-    print(f"Cleaned column names: {df.columns[:5]} ... {df.columns[-5:]}")
 
-
-
-    # Removing stray headers and empty labels
-    execution_checkpoint("Remove stray headers and empty labels")
+    if interactive:
+        execution_checkpoint("Remove stray headers and empty labels")
     print("\n3. Removing stray headers and empty labels")
     n_before = len(df)
-    t0 = time.perf_counter()
-
-
-    # 1. Identify stray headers
-    unique_protocols = df['Protocol'].unique()
-    stray_vals = [val for val in unique_protocols if str(val).strip() == 'Protocol']
+    stray_vals = [v for v in df['Protocol'].unique() if str(v).strip() == 'Protocol']
     stray_mask = df['Protocol'].isin(stray_vals)
-
-    # 2. Identify empty or null labels
-    unique_labels = df['Label'].unique()
-    empty_vals = [val for val in unique_labels if pd.isna(val) or str(val).strip() == '']
+    empty_vals = [v for v in df['Label'].unique() if pd.isna(v) or str(v).strip() == '']
     null_label_mask = df['Label'].isin(empty_vals)
-
-    # 3. Filter the dataframe (using .copy() to prevent memory fragmentation)
     df = df[~(stray_mask | null_label_mask)].copy()
+    df['Label'] = df['Label'].map({v: str(v).strip() for v in df['Label'].unique()})
+    print(f"   Dropped {n_before - len(df):,} stray-header/empty-label rows")
 
-    # 4. Strip whitespace from the REMAINING valid labels using a fast dictionary map
-    remaining_labels = df['Label'].unique()
-    clean_label_map = {val: str(val).strip() for val in remaining_labels}
-    df['Label'] = df['Label'].map(clean_label_map)
-
-    print(f"\nDropped {n_before - len(df):,} rows with stray headers or empty labels")
-    print(f"Time taken: {time.perf_counter() - t0:.2f}s")
-
-
-
-    execution_checkpoint("Coercing numeric columns and dropping invalid entries")
+    if interactive:
+        execution_checkpoint("Coerce numeric columns and drop invalid entries")
     print("\n4. Coercing numeric columns and dropping invalid entries")
     n_before = len(df)
     feature_cols = [c for c in df.columns if c not in ['Label', 'Timestamp']]
-
     for col in feature_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-
     df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=feature_cols)
-    print(f"\nDropped {n_before - len(df):,} rows with non-numeric or infinite feature values")
+    print(f"   Dropped {n_before - len(df):,} non-numeric/infinite rows")
 
-
-    # Drop rows with negative value flow durations (not possible to have neg flow duration so must be an artifact)
-    execution_checkpoint("Drop negative Flow Duration")
+    if interactive:
+        execution_checkpoint("Drop negative Flow Duration")
     print("\n5. Dropping rows with negative Flow Duration")
     n_before = len(df)
     df = df[df["Flow_Duration"] >= 0]
-    print(f"\nDropped {n_before - len(df):,} rows with Flow Duration < 0")
-    print(f"{n_before:,}->{len(df):,}")
+    print(f"   Dropped {n_before - len(df):,} (Flow_Duration < 0)")
 
-
-
-    # Drop duplicates
-    execution_checkpoint("Dropping duplicate rows")
-    print(f"\n6. Dropping duplicate rows")
+    if interactive:
+        execution_checkpoint("Drop duplicates (features+Label, excluding Timestamp)")
+    print("\n6. Dropping duplicate rows (excluding Timestamp from the key)")
     n_before = len(df)
     t0 = time.perf_counter()
-    df = df.drop_duplicates()
-
+    dedup_subset = [c for c in df.columns if c != "Timestamp"]
+    df = df.drop_duplicates(subset=dedup_subset)
     n_dup = n_before - len(df)
-    pct = 100*n_dup/n_before
-    print(f" Dropped {n_dup:,} duplicates ({pct:.2f}%) ({time.perf_counter()-t0:.1f}s)")
-    print(f" {n_before:,} -> {len(df):,}")
+    print(f"   Dropped {n_dup:,} duplicates ({100*n_dup/max(n_before,1):.2f}%) ({time.perf_counter()-t0:.1f}s)")
 
-
-    # Fixing IAT negative artificats
-    execution_checkpoint("Fixing negative IAT artifacts")
-    print(f"\n7. Fixing neg IAT time artifacts (clip to 0)")
-    t0 = time.perf_counter()
-    iat_cols =[c for c in df.columns if 'IAT' in c]
+    if interactive:
+        execution_checkpoint("Fix negative IAT artifacts")
+    print("\n7. Clipping negative IAT artifacts to 0")
+    iat_cols = [c for c in df.columns if 'IAT' in c]
     for col in iat_cols:
         df[col] = df[col].clip(lower=0)
-    print(f"\nFixed {len(iat_cols)} IAT columns ({time.perf_counter()-t0:.1f}s)")
+    print(f"   Fixed {len(iat_cols)} IAT columns")
 
-
-    # Write cleaned parquet to output file
-    execution_checkpoint("Writing cleaned parquet to output file")
-    print(f"\n8. Writing cleaned parquet")
+    if interactive:
+        execution_checkpoint("Write cleaned parquet")
+    print(f"\n8. Writing cleaned parquet -> {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    t0 = time.perf_counter()
     df.to_parquet(out_path, compression='snappy', index=False)
-    out_mb = out_path.stat().st_size /(1024*1024)
-    print(f" Wrote {out_path} ({out_mb:.1f} MB) ({time.perf_counter()-t0:.1f}s)")
+    out_mb = out_path.stat().st_size / (1024 * 1024)
+    n_feat = len([c for c in df.columns if c not in ('Label', 'Timestamp')])
+    has_ts = "Timestamp" in df.columns
+    print(f"   Wrote {len(df):,} rows x {len(df.columns)} cols "
+          f"({n_feat} features + Label{' + Timestamp' if has_ts else ''}, {out_mb:.1f} MB)")
+
+    if verbose:
+        print_cleaned_stats(df)
+
+    return len(df)
 
 
+def run_clean(in_path, out_dir, split_strat, encoding_strat):
+    columns_to_drop = get_strat_drops(split_strat)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    in_path = Path(in_path)
 
-    print(f"\n  FINAL")
-    print(f"    Rows:  {len(df):,}")
-    print(f"    Cols:  {len(df.columns)}  (61 features + Label)")
-    print(f"    Size:  {out_mb:.1f} MB")
-    print(f"    Path:  {out_path}")
+    print(f"\nClean+dedup | split={split_strat.upper()} encoding={encoding_strat.upper()}")
+    print(f"Input:  {in_path}")
 
-    print(f"\n Loading cleaned parquet stats")
-    try:
-        
-        print("\n--- First 5 Rows of Merged Dataset ---")
-        print(df.head(5).to_string(max_cols=10))
-        
-        
-        print("\n--- Feature Stats (mean, std, min, max) ---")
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        stats_df = df[numeric_cols].describe().T[['mean', 'std', 'min', 'max']]
+    if split_strat == "time_based":
+        base = in_path.name.split('-merged-per_day-')[0]
+        out_folder = out_dir / f"{base}-cleaned-deduped_{split_strat}_{encoding_strat}_{ts}"
+        out_folder.mkdir(parents=True, exist_ok=True)
+        print(f"Output: {out_folder}/ (per-day)")
 
-        # float control
-        pd.set_option('display.float_format', lambda x: f'{x:,.4f}')
-        print(stats_df.to_string())
-        pd.reset_option('display.float_format')
-        
-    except MemoryError:
-        print("\nERROR: The merged dataset is too large to fit into RAM for pandas statistical analysis.")
-    except Exception as e:
-        print(f"\nERROR analyzing Parquet file: {e}")
+        day_files = sorted(in_path.glob("*.parquet"))
+        if not day_files:
+            sys.exit(f"ABORT: no day parquets found in {in_path}")
+        execution_checkpoint(f"Clean {len(day_files)} day-files (straight through, no per-step prompts)")
 
+        grand = 0
+        for f in day_files:
+            print(f"\n========== {f.name} ==========")
+            grand += clean_one(f, out_folder / f.name, columns_to_drop, interactive=False, verbose=False)
+        print(f"\n=== CLEAN DONE (per-day) — {len(day_files)} files, {grand:,} total rows ===")
+        print(f"Output: {out_folder}/")
+    else:
+        base = in_path.name.split('-merged-')[0]
+        out_path = out_dir / f"{base}-cleaned-deduped_{split_strat}_{encoding_strat}_{ts}.parquet"
+        print(f"Output: {out_path}")
+        clean_one(in_path, out_path, columns_to_drop, interactive=True, verbose=True)
+        print("\n=== CLEAN DONE ===")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Clean and deduplicate merged CIC-IDS2018 parquet file")
-    
-    parser.add_argument("--in_path", type=str, default = "auto",
-                        help="Path to merged parquet file to clean. Use 'auto' for dataset menu")
-    
-    parser.add_argument("--out_dir", type=str, default="preprocessing/processes_output/cleaned_datasets",
-                        help="Dir to save the cleaned parquet file")
+    parser = argparse.ArgumentParser(description="Clean and deduplicate merged CIC-IDS2018 parquet(s).")
 
-    parser.add_argument("--split_strat", type=str, choices=["8020_stratified", "time_based"], 
-                        help="Splitting strategy", required=True)
-    parser.add_argument("--encoding_strat", type=str, choices=["binary", "multiclass"],
-                        help="Encoding strategy", default="binary")
-    
+    parser.add_argument("--in_path", type=str, default="auto",
+                        help="Merged parquet (8020) or per-day folder (time_based). 'auto' for menu.")
+    parser.add_argument("--out_dir", type=str, default="preprocessing/processes_output/cleaned_datasets",
+                        help="Dir to save cleaned output")
+    parser.add_argument("--split_strat", type=str, choices=["8020_stratified", "time_based"],
+                        required=True, help="Splitting strategy")
+    parser.add_argument("--encoding_strat", type=str, choices=["binary", "multiclass"], default="binary",
+                        help="Encoding strategy")
+
     args = parser.parse_args()
 
-    input_file = args.in_path
-    if input_file == "auto":
-        input_file = select_merged_dataset("preprocessing/processes_output/merged_datasets")
-
-    apply_drops_and_dedup(
-        in_path = input_file,
-        out_dir=args.out_dir,
-        split_strat=args.split_strat,
-        encoding_strat=args.encoding_strat
-    )
-
+    in_path = resolve_input(args.in_path, args.split_strat)
+    run_clean(in_path, args.out_dir, args.split_strat, args.encoding_strat)
     print("END OF PROCESS")
