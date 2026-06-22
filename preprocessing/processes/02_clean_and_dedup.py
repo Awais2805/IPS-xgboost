@@ -19,7 +19,7 @@ BASE_COLUMNS_TO_DROP = [
       # Redundant Seg Size (2) — corr=1.0 linear duplicates, override verifier's "KEEP"
       "Fwd Seg Size Avg", "Bwd Seg Size Avg",
       # Leakage (1)
-      "Dst Port", "Flow ID", "Src IP", "Dst IP"]
+      "Dst Port", "Flow ID", "Src IP", "Dst IP", "Src Port"]
 
 def execution_checkpoint(step_name):
     response = input(f"\n[CHECKPOINT] Ready to execute: {step_name}. \nPress [Enter] to continue or [q] to quit: ").strip().lower()
