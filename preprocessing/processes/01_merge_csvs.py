@@ -191,19 +191,18 @@ def analyse_merged_parquet(parquet_path, final_cols, total_rows, total_time):
     except Exception as e:
         print(f"\nERROR analyzing Parquet file: {e}")
     
+
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Merge CSVs into one Parquet, or convert each to its own Parquet (per_day).")
+    parser = argparse.ArgumentParser(description="Merge CSVs into one Parquet (8020), or convert each to its own Parquet (per_day / time_based).")
 
     parser.add_argument("--dataset_name", type=str, default="cic-ids2018", help="Name of the dataset to process")
     parser.add_argument("--input_dir", type=str, default="dataset/ids2018_csv", help="Dir containing raw CSV files")
     parser.add_argument("--mismatch_action", type=str, choices=['drop', 'keep'], default='drop',
-                        help="Action to solve extra column mismatches on file merges")
+                        help="Action to solve extra column mismatches (merge mode only)")
     parser.add_argument("--mode", type=str, choices=['merge', 'per_day'], default='merge',
                         help="merge: pool all CSVs into one parquet (8020 path). "
-                             "per_day: one parquet per CSV, no merge (time_based path).")
-    parser.add_argument("--per_day_dir", type=str, default="preprocessing/processes_output/merged_per_day",
-                        help="Output dir for per_day mode.")
+                             "per_day: one parquet per CSV, columns kept as-is (time_based path).")
 
     args = parser.parse_args()
 
@@ -215,16 +214,19 @@ if __name__ == "__main__":
     headers = raw_data_metadata(csv_files)
     preview_data(csv_files)
 
-    base_cols, extra_columns_map, keep_extras = resolve_schema_mismatch(headers, args.mismatch_action)
+    output_dir = Path("preprocessing/processes_output/merged_datasets")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if args.mode == "per_day":
-        convert_csvs_to_parquets(csv_files, Path(args.per_day_dir), base_cols)
+        print("\nMode: per_day (time_based) — all columns kept as-is; "
+              "extra/identifier columns are dropped later in the clean stage.")
+        per_day_dir = output_dir / f"{args.dataset_name}-merged-per_day-{timestamp}"
+        convert_csvs_to_parquets(csv_files, per_day_dir)
         print("END OF PROCESS")
     else:
-        output_dir = Path("preprocessing/processes_output/merged_datasets")
-        output_dir.mkdir(parents=True, exist_ok=True)
+        base_cols, extra_columns_map, keep_extras = resolve_schema_mismatch(headers, args.mismatch_action)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_file_path = output_dir / f"{args.dataset_name}-merged-{timestamp}.parquet"
 
         total_rows, final_cols, total_time = merge_to_parquet(csv_files, out_file_path, extra_columns_map, keep_extras)
@@ -233,7 +235,6 @@ if __name__ == "__main__":
         print(f"\n=== MERGE COMPLETE ===")
         print(f"Target Name:    {args.dataset_name}")
         print(f"File Saved To:  {out_file_path}")
-        print(f"Final Size:     {out_mb:,.1f} MB")
         print(f"Total Rows:     {total_rows:,}")
         print(f"Total Columns:  {len(final_cols)}")
         print(f"Time Taken:     {total_time:.1f} seconds")

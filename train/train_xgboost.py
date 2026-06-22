@@ -78,7 +78,7 @@ def log_peak_ram(tag):
     logging.info(f"[mem] peak RSS after {tag}: {peak_gb:.2f} GB")
 
 
-def train_and_evaluate(splits_dir, out_base):
+def train_and_evaluate(splits_dir, out_base, split_strat):
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(out_base) / f"run_{timestamp}"
@@ -109,14 +109,26 @@ def train_and_evaluate(splits_dir, out_base):
     # and the operating threshold. Free X_train_full immediately so the
     # fit doesn't hold the full frame + the carved copies at once.
     # -----------------------------------------------------------------
-    logging.info("\n2. Carving validation set from train (stratified 80/20)")
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train_full, y_train_full, test_size=0.2, random_state=42, stratify=y_train_full
-    )
+    if split_strat == "time_based":
+        # Temporal carve: X_train rows are in chronological day order, so the
+        # last 20% are the latest train days — a validation slice that mimics
+        # the train->test time gap (no shuffle, no stratify).
+        logging.info("\n2. Carving validation set from train (temporal tail 80/20)")
+        n_val = max(1, int(len(X_train_full) * 0.2))
+        X_tr, X_val = X_train_full.iloc[:-n_val], X_train_full.iloc[-n_val:]
+        y_tr, y_val = y_train_full.iloc[:-n_val], y_train_full.iloc[-n_val:]
+    else:
+        logging.info("\n2. Carving validation set from train (stratified 80/20)")
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_train_full, y_train_full, test_size=0.2, random_state=42, stratify=y_train_full
+        )
     del X_train_full
     gc.collect()
     logging.info(f"Phase-1 train: {len(X_tr):,} | Validation: {len(X_val):,}")
-
+    if int((y_val == 1).sum()) == 0:
+        logging.warning("Phase-1 validation has 0 attacks — early stopping (aucpr) and "
+                        "threshold selection will be unreliable; adjust --test_days/boundary.")
+        
     spw_phase1 = (y_tr == 0).sum() / (y_tr == 1).sum()
     logging.info(f"Phase-1 scale_pos_weight (train subset): {spw_phase1:.2f}")
 
@@ -277,4 +289,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     splits_dir = resolve_split_dir(args.split_strat, args.in_path, args.non_interactive)
-    train_and_evaluate(splits_dir, args.out_dir)
+    train_and_evaluate(splits_dir, args.out_dir, args.split_strat)
