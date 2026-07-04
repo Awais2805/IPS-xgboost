@@ -193,5 +193,6 @@ The final shape is a hybrid: signature rules as the fast path, ML-based action p
 
 NOTE: strong signs of overfitting - somewhat expected...
 
-**Next-steps:**
-determine whether overfitting regularisation is required or if we should pivot to larger scale netem env, 
+4. Retrain the same xgboost model on a new netem generated dataset - different scenario but same attack family. 
+**IN-PROGRESS**
+
