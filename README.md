@@ -189,3 +189,9 @@ The final shape is a hybrid: signature rules as the fast path, ML-based action p
 1. Implement adapt flow file to make netem generated flows follow required schema convention of the current pipeline
 2. Run the netem flows (post adapt) through the cleaning + encode + split phase. 
 3. Train xgboost model on final train ready netem captured data. 
+**DONE**
+
+NOTE: strong signs of overfitting - somewhat expected...
+
+**Next-steps:**
+determine whether overfitting regularisation is required or if we should pivot to larger scale netem env, 
