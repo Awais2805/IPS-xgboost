@@ -178,8 +178,14 @@ The final shape is a hybrid: signature rules as the fast path, ML-based action p
 
 - [x] Data collection
 - [x] Preprocessing pipeline (merge + clean + verify)
-- [ ] Binary encoding (refactoring in progress)
+- [x] Binary encoding (refactoring in progress)
 - [x] First XGBoost training run + post-run viz
-- [ ] Preprocessing exploratory plots on raw merged data
+- [x] Preprocessing exploratory plots on raw merged data
 - [ ] Multi-class model
 - [ ] Prevention layer (signature rules + ML action selector)
+
+## Integration of netemDocker
+
+1. Implement adapt flow file to make netem generated flows follow required schema convention of the current pipeline
+2. Run the netem flows (post adapt) through the cleaning + encode + split phase. 
+3. Train xgboost model on final train ready netem captured data. 
