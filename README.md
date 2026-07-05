@@ -189,10 +189,12 @@ The final shape is a hybrid: signature rules as the fast path, ML-based action p
 1. Implement adapt flow file to make netem generated flows follow required schema convention of the current pipeline
 2. Run the netem flows (post adapt) through the cleaning + encode + split phase. 
 3. Train xgboost model on final train ready netem captured data. 
-**DONE**
-
 NOTE: strong signs of overfitting - somewhat expected...
 
-4. Retrain the same xgboost model on a new netem generated dataset - different scenario but same attack family. 
-**IN-PROGRESS**
+4. Retrain the same xgboost model on a new netem generated dataset - different scenario but same attack family.
+        - model trained on netem data was unable to generalise well on the cic-ids2018 data and vice versa
+
+## Imporving cross env generalisability
+
+1. Train a model on cic-ids 2017 and see if cross evaluation between this model and cic-ids 2018 model shows a decent attempt to generalise between envs (not strict cross env eval since 2018 and 2017 use cicflowmeter)
 
