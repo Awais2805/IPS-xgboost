@@ -2,14 +2,15 @@
 """
 Adapt netemDocker cicflowmeter flows -> CIC-IDS2018 merged-parquet schema.
 
-Reads the labelled netem flows (flows_labeled.csv), renames columns to the
-CIC-IDS2018 convention, drops the netem-only identifier + Family columns, and
+Auto-selects the newest flows_labeled_*.csv (or --in_path), renames columns to
+the CIC-IDS2018 convention, drops netem-only identifier + Family columns, and
 writes an all-string 'merged' parquet that 02_clean_and_dedup.py consumes
-directly (glob: *-merged-*.parquet).
+directly (glob: *-merged-*.parquet). Output is named per run so runs don't
+overwrite each other.
 
 Run from the IPS/ project root. Next stage:
   python3 preprocessing/processes/02_clean_and_dedup.py \
-      --in_path preprocessing/processes_output/merged_datasets/netem-ids2018-merged-<ts>.parquet \
+      --in_path preprocessing/processes_output/merged_datasets/<this output> \
       --split_strat 8020_stratified --encoding_strat binary
 """
 
@@ -18,10 +19,9 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
-# netem cicflowmeter -> CIC-IDS2018 merged column names.
-# Verified against the merged parquet footer (79 renames). cwr_flag_count maps
-# to "CWE Flag Count" (the CIC dataset's known typo for the CWR flag; it is in
-# BASE_COLUMNS_TO_DROP so cleaning discards it regardless).
+# netem cicflowmeter -> CIC-IDS2018 merged column names (79 renames).
+# cwr_flag_count -> "CWE Flag Count" (CIC's known typo for the CWR flag; it is
+# dropped in cleaning regardless).
 RENAME = {
     'dst_port': 'Dst Port',
     'protocol': 'Protocol',
@@ -104,22 +104,44 @@ RENAME = {
     'subflow_bwd_byts': 'Subflow Bwd Byts',
 }
 
-# netem-only columns with no CIC counterpart -> dropped (identifiers + Family).
 DROP_COLS = ['src_ip', 'dst_ip', 'src_port', 'Family']
+
+
+def resolve_in_path(in_path, cap_dir):
+    if in_path != "auto":
+        return Path(in_path)
+    files = sorted(Path(cap_dir).glob("flows_labeled_*.csv"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise SystemExit(f"ABORT: no flows_labeled_*.csv in {cap_dir} (pass --in_path)")
+    return files[0]
+
+
+def derive_ts(path):
+    name = Path(path).name
+    if name.startswith("flows_labeled_") and name.endswith(".csv"):
+        return name[len("flows_labeled_"):-len(".csv")]
+    return ""
 
 
 def main():
     ap = argparse.ArgumentParser(description="Adapt netem flows to CIC-IDS2018 merged schema")
-    ap.add_argument("--in_path", default="../netemDocker/capture/flows_labeled.csv",
-                    help="labelled netem flows CSV (from label_flows.py)")
+    ap.add_argument("--in_path", default="auto",
+                    help="labelled netem CSV, or 'auto' for newest flows_labeled_*.csv")
+    ap.add_argument("--cap_dir", default="../netemDocker/capture",
+                    help="dir to search when --in_path auto")
     ap.add_argument("--out_dir", default="preprocessing/processes_output/merged_datasets",
                     help="dir to write the merged-format parquet")
-    ap.add_argument("--dataset_name", default="netem-ids2018",
-                    help="artefact name token (drives the -merged- filename)")
+    ap.add_argument("--dataset_name", default=None,
+                    help="artefact name token (default: netem-ids2018-<run_ts>)")
     args = ap.parse_args()
 
-    df = pd.read_csv(args.in_path)
-    print(f"read {len(df):,} rows x {len(df.columns)} cols from {args.in_path}")
+    in_path = resolve_in_path(args.in_path, args.cap_dir)
+    ts = derive_ts(in_path)
+    name = args.dataset_name or (f"netem-ids2018-{ts}" if ts else "netem-ids2018")
+
+    df = pd.read_csv(in_path)
+    print(f"read {len(df):,} rows x {len(df.columns)} cols from {in_path}")
 
     present_drop = [c for c in DROP_COLS if c in df.columns]
     df = df.drop(columns=present_drop)
@@ -133,13 +155,12 @@ def main():
     if "Label" not in df.columns:
         raise SystemExit("ABORT: no Label column — run label_flows.py first")
 
-    # Mirror the merge stage: store everything as string; 02 coerces types.
-    df = df.astype(str)
+    df = df.astype(str)   # mirror the merge stage; 02 coerces types
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    gen_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{args.dataset_name}-merged-{ts}.parquet"
+    out_path = out_dir / f"{name}-merged-{gen_ts}.parquet"
     df.to_parquet(out_path, compression="snappy", index=False)
 
     print(f"wrote {len(df):,} rows x {len(df.columns)} cols -> {out_path}")
