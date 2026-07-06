@@ -197,4 +197,16 @@ NOTE: strong signs of overfitting - somewhat expected...
 ## Imporving cross env generalisability
 
 1. Train a model on cic-ids 2017 and see if cross evaluation between this model and cic-ids 2018 model shows a decent attempt to generalise between envs (not strict cross env eval since 2018 and 2017 use cicflowmeter)
+        - Cross eval shows that 2017 model is unable to generalise to 2018 model
+
+2. Train a model (balanced) on 2017 and 2018 cic-ids datasets and then fit that model to ddos-2019 dataset. 
+
+ddos-2019 is attack heavy so main metric to check is recall. 
+        We will run two seperate scenarios:
+        - Run pipeline on SYN.csv (familiar attack + novel env)
+        - Run pipeline on other files in dd0s-2019 (novel attack +env)
+
+Ran a model trained on a combined dataset (2017 + 2018 CIC-IDS) on 2019 DDoS CIC. 2 seperate runs - where one evaluation was completed on the Portmap dataset (unseen attack) and another on the Syn dataset (both part of DDoS CIC 2019). 
+
+Results: The trained model was able to generalise to detecting syn flood attacks - this shows that it can predict attacks that it has seen in novel enviroments. The model however was unable to detect novel attacks in novel enviroment as it performed poorly in recall and precision in detecting Portmap attacks. 
 

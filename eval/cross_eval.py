@@ -10,14 +10,15 @@ Leads with threshold-independent metrics (PR-AUC / ROC-AUC), which are the fair
 cross-dataset numbers; the operating-threshold confusion is reported too but the
 threshold was tuned on the model's own distribution.
 
-Examples:
-  # run-A model on run-B encoded data (the cross-run generalization test)
-  python3 eval/cross_eval.py \
-      --model models/run_20260704_142850 \
-      --data preprocessing/processes_output/encoded_datasets/<runB-encoded>.parquet \
-      --tag A_on_B
+--sweep additionally re-thresholds the SAME predictions across many cutoffs and
+reports the best-F1 threshold + its precision/recall — the model's detection
+"ceiling" on this data if the threshold were re-calibrated for it. (Optimistic:
+it's tuned on the eval set, so treat it as an upper bound, not a deployable
+threshold.)
 
-  # any model on any split's held-out test set
+Examples:
+  python3 eval/cross_eval.py --model models/run_X \
+      --data preprocessing/processes_output/encoded_datasets/<enc>.parquet --tag A_on_B --sweep
   python3 eval/cross_eval.py --model models/run_X \
       --data dataset/data-splits/8020_strat_split/split_Y
 """
@@ -30,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 
 BENIGN_LABEL = "Benign"
 
@@ -99,7 +100,30 @@ def prf(tp, fp, fn):
     return p, r, f
 
 
-def evaluate(model_arg, data_arg, threshold_override=None):
+def sweep_thresholds(y, y_prob):
+    """Re-threshold the same predictions: best-F1 point + a fixed grid so the
+    precision/recall tradeoff is visible."""
+    prec, rec, thr = precision_recall_curve(y, y_prob)
+    f1 = (2 * prec * rec) / (prec + rec + 1e-9)
+    bi = int(np.argmax(f1[:-1]))          # f1 has one more element than thr
+    bt = float(thr[bi])
+    tp, fp, fn, tn = counts_at(y, y_prob, bt)
+    best = {"threshold": round(bt, 6),
+            "precision": round(float(prec[bi]), 6),
+            "recall": round(float(rec[bi]), 6),
+            "f1": round(float(f1[bi]), 6),
+            "confusion": {"tn": tn, "fp": fp, "fn": fn, "tp": tp}}
+    grid = []
+    for t in [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 0.9]:
+        tp, fp, fn, tn = counts_at(y, y_prob, t)
+        pp, rr, ff = prf(tp, fp, fn)
+        grid.append({"threshold": t, "precision": round(pp, 4),
+                     "recall": round(rr, 4), "f1": round(ff, 4),
+                     "tp": tp, "fp": fp, "fn": fn, "tn": tn})
+    return {"best_f1": best, "grid": grid}
+
+
+def evaluate(model_arg, data_arg, threshold_override=None, do_sweep=False):
     model_path, run_dir = resolve_model(model_arg)
     if not model_path.is_file():
         raise SystemExit(f"model not found: {model_path}")
@@ -121,7 +145,7 @@ def evaluate(model_arg, data_arg, threshold_override=None):
 
     tp, fp, fn, tn = counts_at(y, y_prob, threshold)
     p, r, f1 = prf(tp, fp, fn)
-    return {
+    res = {
         "model": str(model_path),
         "data": str(Path(data_arg)),
         "data_name": data_name,
@@ -138,6 +162,9 @@ def evaluate(model_arg, data_arg, threshold_override=None):
         "features_dropped": dropped,
         "n_features_model": (len(feats) if feats else int(X.shape[1])),
     }
+    if do_sweep:
+        res["sweep"] = sweep_thresholds(y, y_prob)
+    return res
 
 
 def main():
@@ -148,11 +175,13 @@ def main():
                     help="encoded parquet (features + Target/Label) or split dir")
     ap.add_argument("--threshold", type=float, default=None,
                     help="override; default = model's operating_threshold.txt")
+    ap.add_argument("--sweep", action="store_true",
+                    help="also report the best-F1 threshold + a tradeoff grid (detection ceiling)")
     ap.add_argument("--out_dir", default="eval/results", help="where to write the results JSON")
     ap.add_argument("--tag", default=None, help="label for this eval (e.g. A_on_B)")
     args = ap.parse_args()
 
-    res = evaluate(args.model, args.data, args.threshold)
+    res = evaluate(args.model, args.data, args.threshold, args.sweep)
     tag = args.tag or f"{Path(res['model']).parent.name}__on__{res['data_name']}"
 
     print(f"\n=== CROSS-EVAL: {tag} ===")
@@ -166,10 +195,20 @@ def main():
         print("align : feature spaces match exactly")
     print(f"\nPR-AUC : {res['pr_auc']:.4f}    ROC-AUC: {res['roc_auc']:.4f}    "
           "(threshold-independent — the fair cross-eval metrics)")
-    print(f"@thr {res['threshold']:.4f} -> precision {res['precision']:.4f}  "
+    print(f"@thr {res['threshold']:.4f} (model's own) -> precision {res['precision']:.4f}  "
           f"recall {res['recall']:.4f}  F1 {res['f1']:.4f}")
     c = res["confusion"]
     print(f"confusion: TN {c['tn']:,}  FP {c['fp']:,}  FN {c['fn']:,}  TP {c['tp']:,}")
+
+    if "sweep" in res:
+        b = res["sweep"]["best_f1"]; bc = b["confusion"]
+        print("\n--- threshold sweep (re-calibrated on THIS data; optimistic upper bound) ---")
+        print(f"best-F1 @thr {b['threshold']:.4f} -> precision {b['precision']:.4f}  "
+              f"recall {b['recall']:.4f}  F1 {b['f1']:.4f}")
+        print(f"  confusion: TN {bc['tn']:,}  FP {bc['fp']:,}  FN {bc['fn']:,}  TP {bc['tp']:,}")
+        print(f"  {'thr':>5} {'prec':>7} {'recall':>7} {'f1':>7}")
+        for g in res["sweep"]["grid"]:
+            print(f"  {g['threshold']:>5.2f} {g['precision']:>7.4f} {g['recall']:>7.4f} {g['f1']:>7.4f}")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
