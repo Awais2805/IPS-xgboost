@@ -208,5 +208,9 @@ ddos-2019 is attack heavy so main metric to check is recall.
 
 Ran a model trained on a combined dataset (2017 + 2018 CIC-IDS) on 2019 DDoS CIC. 2 seperate runs - where one evaluation was completed on the Portmap dataset (unseen attack) and another on the Syn dataset (both part of DDoS CIC 2019). 
 
+### Deferred to talos 
+Prevention layer 
+multi-class classification 
+
 Results: The trained model was able to generalise to detecting syn flood attacks - this shows that it can predict attacks that it has seen in novel enviroments. The model however was unable to detect novel attacks in novel enviroment as it performed poorly in recall and precision in detecting Portmap attacks. 
 
