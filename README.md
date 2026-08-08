@@ -14,7 +14,7 @@ Train an ML model to classify network traffic into:
 - **Suspicious** — anomalous but not confidently malicious
 - **Dangerous** — confirmed attack patterns
 
-The current scope is a **binary baseline** (benign vs. malicious). A multi-class extension covering all 14 attack types in CIC-IDS2018 will follow.
+The current scope is a **binary baseline** (benign vs. malicious). A multi-class extension covering all 14 attack types in CIC-IDS2018 will follow (deferred to talos).
 
 ---
 
